@@ -1,0 +1,15 @@
+# 核心依赖（阶段 1-4、6-7 必需）
+playwright==1.51.0
+tf-playwright-stealth==1.2.0
+openai==2.54.0
+langgraph==1.2.14
+mcp==1.30.0
+httpx==0.28.1
+
+# 可选：阶段 5 代码执行沙箱（OpenSandbox）
+# 不装也能跑，05_sandbox.py 会自动降级为 subprocess + rlimit
+opensandbox==1.2.0
+opensandbox-server==1.2.0
+
+# 可选：视觉定位模型的官方 SDK（当前代码走 OpenAI 兼容端点，不强制需要）
+dashscope==1.22.1

@@ -1,0 +1,25 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ===== 运行时产物 =====
+# 浏览器登录态（含 Cookie/localStorage，41MB，严禁上传）
+.browser_profile/
+# OpenSandbox 本地 SQLite 与日志
+.opensandbox/
+# 抓取结果、截图等临时文件
+bing_result.txt
+*.log
+
+# ===== 本地配置 =====
+.env
+.env.*
+*.local
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+.DS_Store
