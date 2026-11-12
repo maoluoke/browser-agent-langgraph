@@ -73,9 +73,11 @@ def _sel(eid: str) -> str:
 
 
 def _input_value(bt, sel: str) -> str:
-    """读取输入框当前值；页面跳转中读不到时返回空串，由调用方重试"""
+    """读取表单控件当前值（input 读 value，div 模拟输入框读 innerText）；
+    页面跳转中读不到时返回空串，由调用方重试"""
     try:
-        return _input_value(bt, sel) or ""
+        return bt.page.eval_on_selector(
+            sel, "e => ((e.value !== undefined && e.value) || e.innerText || '')").strip() or ""
     except Exception:
         return ""
 
@@ -98,7 +100,7 @@ def _set_city(bt, index: int, city: str, y_min: int = 200, y_max: int = 520) -> 
         bt.page.wait_for_timeout(1200)
         bt.select_suggestion(city)
         bt.page.wait_for_timeout(400)
-        if _input_value(bt, _sel(eid)) == city:
+        if city in _input_value(bt, _sel(eid)):
             return True
     return False
 
@@ -292,7 +294,7 @@ def _set_city_eid(bt, eid: str, city: str, y_min: int = 200, y_max: int = 520) -
             bt.page.wait_for_timeout(1200)
             bt.select_suggestion(city)
             bt.page.wait_for_timeout(400)
-            return _input_value(bt, sel) == city
+            return city in _input_value(bt, sel)
         except Exception:
             els = sorted([e for e in bt.elements()
                           if e["tag"] == "input" and y_min < e["y"] < y_max], key=lambda e: e["x"])
@@ -302,14 +304,38 @@ def _set_city_eid(bt, eid: str, city: str, y_min: int = 200, y_max: int = 520) -
     return False
 
 
-# ---------- 结果归纳（可选） ----------
+# ---------- 结果归纳 ----------
+# 车次行在页面文本里的形态：06:31 上海虹桥 5时47分 G532 12:18 北京南
+# 本地正则解析，不调用大模型：零成本、无幻觉，未配置 API Key 也能用
+_TRAIN_ROW = re.compile(
+    r"(\d{1,2}:\d{2})\s+(\S+?)\s+(\d+时\d+分|\d+分)\s+([GDCZKTD]\d{1,4})\s+"
+    r"(\d{1,2}:\d{2})\s+(\S+)")
+
+
+def parse_train_rows(text: str, limit: int = 3) -> list[str]:
+    """从结果页文本中提取最早出发的 N 趟车次，全部字段原样取自页面"""
+    rows = []
+    for m in _TRAIN_ROW.finditer(text):
+        dep, from_st, dur, code, arr, to_st = m.groups()
+        rows.append(f"{code}  {dep}-{arr}  {from_st}-{to_st}  {dur}")
+        if len(rows) >= limit:
+            break
+    return rows
+
+
 def llm_summary(text: str, mode: str, extra: str = "") -> str:
+    """只允许基于页面文本归纳，禁止编造页面上不存在的信息（尤其票价）"""
     if mode == "train":
         ask = ("下面是携程火车票搜索结果页的文本。请列出最早出发的三趟车次，"
-               "格式：车次号 出发时间-到达时间 出发站-到达站 历时 票价。只输出这三行。")
+               "格式：车次号 出发时间-到达时间 出发站-到达站 历时 票价。只输出这三行。\n"
+               "严格要求：所有字段必须能在页面文本中原样找到。若页面显示"
+               "「登录可查看余票/票价」等字样，说明未登录看不到票价，票价一栏必须写"
+               "「需登录查看」，严禁自己估算或编造任何价格数字。")
     else:
         ask = ("下面是携程酒店搜索结果页的文本。请推荐评分最高的三家酒店，"
-               "格式：酒店名 评分 价格 位置。只输出这三行。")
+               "格式：酒店名 评分 价格 位置。只输出这三行。\n"
+               "严格要求：所有字段必须能在页面文本中原样找到；页面没有价格就写「无价格」，"
+               "严禁编造。")
     resp = _llm().chat.completions.create(
         model=_ra.AGENT_MODEL,
         messages=[{"role": "user", "content": f"{ask}\n用户需求：{extra}\n\n页面文本：\n{text}"}],
@@ -496,13 +522,22 @@ def main() -> None:
         text = run_train(bt, args) if args.mode == "train" else run_hotel(bt, args)
         if not text:
             print("[结果] 未获取到结果页，请查看浏览器窗口状态")
+        elif args.mode == "train":
+            rows = parse_train_rows(text)
+            if rows:
+                print("\n[最早出发的三趟车次]（本地解析，未调用大模型）")
+                for r in rows:
+                    print(f"  {r}")
+            if args.llm:
+                extra = f"{args.from_city}到{args.to_city} {args.date}"
+                print(f"\n[大模型归纳]\n{llm_summary(text, args.mode, extra)}")
+            elif not rows:
+                print(f"\n[结果页文本（前 1200 字）]\n{text[:1200]}")
         elif args.llm:
-            extra = (f"{args.from_city}到{args.to_city} {args.date}" if args.mode == "train"
-                     else f"{args.city} {args.checkin}-{args.checkout}")
+            extra = f"{args.city} {args.checkin}-{args.checkout}"
             print(f"\n[大模型归纳]\n{llm_summary(text, args.mode, extra)}")
         else:
             print(f"\n[结果页文本（前 1200 字）]\n{text[:1200]}")
-            print("\n提示：加 --llm 可让大模型归纳成三行结论")
         bt.pause_for_human("查看结果后按回车关闭浏览器（如需下单请自行操作，程序不会提交订单）")
     finally:
         bt.close()

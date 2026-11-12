@@ -43,10 +43,54 @@
 | `04_agent_graph.py` | LangGraph Planner/Executor/Reviewer 状态机，支持重规划；可注入领域提示词 | 4 子任务链路全 PASS |
 | `05_sandbox.py` | OpenSandbox 代码执行沙箱，容器级隔离；subprocess+rlimit 兜底 | 沙箱内写文件宿主机不可见 |
 | `06_mcp_client.py` | MCP Host：stdio 拉起 3 个工具服务，schema 转 OpenAI 格式跑 ReAct | 搜索+写文件链路 |
-| `07_ctrip_agent.py` | 携程订票/订房：确定性流程（城市→日期→搜索→结果归纳），含登录态持久化、支付安全闸门、`--agent` 自主模式 | 火车票查询取到最早三趟车次 |
+| `07_ctrip_agent.py` | 携程订票/订房：确定性流程（城市→日期→搜索→本地解析车次），含登录态持久化、支付安全闸门、`--agent` 自主模式 | 火车票查询取到最早三趟车次 |
 | `mcp_servers/browser_server.py` | 浏览器工具 MCP 服务（6 个工具） | 由 06 托管验证 |
 | `mcp_servers/filesystem_server.py` | 文件读写 MCP 服务（限 project3 根目录，防路径逃逸） | 由 06 托管验证 |
 | `mcp_servers/search_server.py` | 必应搜索 MCP 服务（httpx 轻量抓取，不占浏览器） | 由 06 托管验证 |
+
+## 演示效果
+
+携程火车票查询（`07_ctrip_agent.py`，不需要登录，也不会调用大模型）：
+
+```bash
+python3 07_ctrip_agent.py --mode train --from 上海 --to 北京 --date 2026-11-20
+```
+
+终端输出：
+
+```
+  城市: 上海 → 北京   日期: 2026-11-20
+  日期选择: 成功（出发日期 2026-11-20 星期五 添加返程）
+  点击搜索...
+    点候选搜索按钮「搜索」button @(1185,324)
+    搜索生效（结果页出现「余票」）
+  结果页: 上海到北京火车票预订与代购-高铁票价,动车票价-...
+
+[最早出发的三趟车次]（本地解析，未调用大模型）
+  G532  06:31-12:18  上海虹桥-北京南  5时47分
+  G548  06:32-12:39  上海虹桥-北京南  6时7分
+  G2  06:43-11:32  上海虹桥-北京南  4时49分
+```
+
+![携程火车票搜索结果](docs/demo-train.png)
+
+> 截图为未登录状态：携程只展示车次与时刻，票价需要登录后才可见，因此程序不输出票价，
+> 也不会让模型去猜。
+
+## 踩坑排查
+
+这些是实际调试中遇到的问题，按出现顺序排列：
+
+| 现象 | 根因 | 处理 |
+|---|---|---|
+| 点了「搜索」页面没反应 | 页头和表单各有一个「搜索」，点到了页头那个 | 取页面最靠下的搜索按钮按坐标点击，点完验证「余票」出现，失败再退化到 Enter / 视觉定位 |
+| 城市被填成「北京北」 | 下拉候选是「北京\\nbeijing」「北京北\\nbeijingbei」，按文字包含匹配会命中后者 | 改为按首行完全匹配的 `select_suggestion` |
+| 日历点不到目标日期 | 日历格子只有纯数字，没有「11月5日」这类文案 | `click_nth("5", 0, exact=True)` 按数字点 |
+| `Execution context was destroyed` | 页面跳转瞬间调用 `evaluate` | 包装成返回空值，由下一轮重新获取 |
+| 填了城市但搜索仍是旧城市 | 携程表单是 React 受控组件，直接改 value 不触发 onChange | 逐字 `type(delay=80)`，并校验控件当前值 |
+| 同一命令重复提示「城市未成功设置」 | `_input_value` 被批量替换误改成递归调用自身，异常被吞掉后恒返回空串 | 改为读取 `value`/`innerText`，并修正调用点 |
+| 大模型输出的票价是编的 | 未登录页面只显示「登录可查看余票/票价」 | 改为本地正则解析车次，不输出票价；大模型归纳改为可选 |
+| `Free quota exhausted` 403 | 百炼账号开启「仅使用免费额度」且额度耗尽 | 关闭该模式，或用 `AGENT_MODEL` 换模型 |
 
 ## 环境与启动
 
@@ -117,23 +161,24 @@ OPENSANDBOX_INSECURE_SERVER=YES opensandbox-server --config ~/.sandbox.toml \
 
 为什么不走"让大模型一步步点页面"：携程表单是自定义组件，每个动作都要等一次模型响应
 （10～50 秒），既慢又会在中途重复输入、卡在某个字段。因此默认由**代码直接跑固定流程**，
-大模型只在最后把结果页归纳成三行（`--llm`）。
+车次结果用**本地正则解析**（零成本、无幻觉，不需要 API Key）；
+`--llm` 才额外调用大模型做归纳。
 
 ```bash
 cd /media/zkx456/系统/ai课件/project3
 
-# 火车票：城市 → 日期 → 搜索 → 归纳最早三趟
+# 火车票：城市 → 日期 → 搜索 → 本地解析最早三趟（不花钱）
 /home/zkx456/other/bin/python3.13 -u 07_ctrip_agent.py \
-  --mode train --from 上海 --to 北京 --date 2026-11-05 --llm --slow-mo 300
+  --mode train --from 上海 --to 北京 --date 2026-11-20 --slow-mo 300
 
 # 酒店：首次先登录一次（登录态存 project3/.browser_profile）
 /home/zkx456/other/bin/python3.13 -u 07_ctrip_agent.py --login
 /home/zkx456/other/bin/python3.13 -u 07_ctrip_agent.py \
-  --mode hotel --city 上海 --checkin 2026-11-05 --checkout 2026-11-07 --llm --slow-mo 300
+  --mode hotel --city 上海 --checkin 2026-11-20 --checkout 2026-11-22 --slow-mo 300
 
-# 大模型自主模式（慢，每步等一次模型响应）
+# 大模型自主模式（慢，每步等一次模型响应，需要 API 额度）
 /home/zkx456/other/bin/python3.13 -u 07_ctrip_agent.py \
-  --mode train --agent --task "查11月5日上海到北京最早三趟高铁" --slow-mo 500
+  --mode train --agent --task "查11月20日上海到北京最早三趟高铁" --slow-mo 500
 ```
 
 参数：`--mode train|hotel`、`--from/--to/--date`、`--city/--checkin/--checkout`、
@@ -199,3 +244,9 @@ OpenAI function calling 格式即可复用 ReAct 循环。
 - 遇到滑块/短信验证码：程序会调 `pause_for_human` 暂停，在窗口里人工完成后回车继续；
   非 TTY（后台运行）时该暂停自动跳过
 - 提交订单与支付永不自动执行，只做到订单填写页
+- 携程**未登录时只展示车次与时刻，不展示票价**（页面提示「登录可查看余票/票价」）；
+  程序因此不输出票价，需要票价请先 `--login` 登录
+- 项目 01-06 阶段依赖大模型（`DASHSCOPE_API_KEY`）；07 的确定性火车票流程不需要，
+  只有 `--llm` / `--agent` 才调用模型
+- 百炼账号若开启「仅使用免费额度」且额度耗尽，会返回 `403 Free quota exhausted`，
+  需在控制台关闭该模式或改用其他模型
